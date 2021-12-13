@@ -8,7 +8,6 @@
 #include <string.h> /* memcpy */
 #include <pthread.h>
 #include <errno.h>
-#include <semaphore.h>
 #include "queue.h"
 
 /********************************************************/
@@ -53,55 +52,45 @@
     *(int*)(&addr[QUEUE_STAT_IDX])
 
 /********************************************************/
-/* Data                                                 */
-/********************************************************/
-static sem_t*   queue_semaphore;
-
-/********************************************************/
 /* Function Prototypes                                  */
 /********************************************************/
-static int      queue_init( int fd, long queue_maxmsg, size_t queue_maxsize );
+static int      queue_shm_init( const char *name, int oflag, long queue_maxmsg, size_t queue_msgsize );
+static sem_t*   queue_sem_init( const char *name, int oflag );
+static int      queue_data_init( int fd, long queue_maxmsg, size_t queue_maxsize );
 static int      queue_enqueue( unsigned char *shmPtr, const char *msg_ptr, size_t msg_len );
 static ssize_t  queue_dequeue( unsigned char *shmPtr, char *msg_ptr );
 
 /********************************************************/
 /* External Functions                                   */
 /********************************************************/
-int queue_open( const char *name, int oflag, long queue_maxmsg, size_t queue_msgsize )
+int queue_open( const char *name, int oflag, long queue_maxmsg, size_t queue_msgsize, qd_t *qd )
 {
     int rtn;
     int fd;
-    int initResult;
+    sem_t* sem;
 
     rtn = QUEUE_E_NOT_OK;
-    fd = shm_open( name, oflag, S_IRWXU | S_IRWXG | S_IRWXO );
+    fd = queue_shm_init( name, oflag, queue_maxmsg, queue_msgsize );
     if( fd != QUEUE_E_NOT_OK )
     {
-        if(( oflag & O_CREAT ) == O_CREAT )
+        sem = queue_sem_init( name, oflag );
+        if( sem != (sem_t*)QUEUE_E_NOT_OK )
         {
-            queue_semaphore = sem_open( name, O_CREAT, S_IRWXU | S_IRWXG | S_IRWXO, 1 );
-            initResult = queue_init( fd, queue_maxmsg, queue_msgsize );
-            if( initResult == QUEUE_E_OK )
-            {
-                rtn = fd;
-            }
-            else
-            {
-                (void)close( fd );
-                (void)shm_unlink( name );
-            }
+            qd->fd = fd;
+            qd->sem = sem;
+            rtn = QUEUE_E_OK;
         }
         else
         {
-            queue_semaphore = sem_open( name, 0 );
-            rtn = fd;
+            (void)close( fd );
+            (void)shm_unlink( name );
         }
     }
 
     return rtn;
 }
 
-ssize_t queue_receive( int fd, char *msg_ptr )
+ssize_t queue_receive( const qd_t *qd, char *msg_ptr )
 {
     ssize_t rtn;
     ssize_t msg_len;
@@ -111,17 +100,17 @@ ssize_t queue_receive( int fd, char *msg_ptr )
     struct stat status;
 
     rtn = QUEUE_E_NOT_OK;
-    if( fd != QUEUE_E_NOT_OK )
+    if( qd->fd != QUEUE_E_NOT_OK )
     {
-        fstatResult = fstat( fd, &status );
+        fstatResult = fstat( qd->fd, &status );
         if( fstatResult != QUEUE_E_NOT_OK )
         {
-            shmPtr = mmap( NULL, status.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+            shmPtr = mmap( NULL, status.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, qd->fd, 0 );
             if( shmPtr != (unsigned char *)QUEUE_E_NOT_OK )
             {
-                (void)sem_wait( queue_semaphore );
+                (void)sem_wait( qd->sem );
                 msg_len = queue_dequeue( shmPtr, msg_ptr );
-                (void)sem_post( queue_semaphore );
+                (void)sem_post( qd->sem );
                 munmapResult = munmap( shmPtr, status.st_size );
                 if( munmapResult != QUEUE_E_NOT_OK )
                 {
@@ -134,7 +123,7 @@ ssize_t queue_receive( int fd, char *msg_ptr )
     return rtn;
 }
 
-int queue_send( int fd, const char *msg_ptr, size_t msg_len )
+int queue_send( const qd_t *qd, const char *msg_ptr, size_t msg_len )
 {
     int rtn;
     int sendResult;
@@ -144,17 +133,17 @@ int queue_send( int fd, const char *msg_ptr, size_t msg_len )
     struct stat status;
 
     rtn = QUEUE_E_NOT_OK;
-    if( fd != QUEUE_E_NOT_OK )
+    if( qd->fd != QUEUE_E_NOT_OK )
     {
-        fstatResult = fstat( fd, &status );
+        fstatResult = fstat( qd->fd, &status );
         if( fstatResult != QUEUE_E_NOT_OK )
         {
-            shmPtr = mmap( NULL, status.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+            shmPtr = mmap( NULL, status.st_size, PROT_READ | PROT_WRITE, MAP_SHARED, qd->fd, 0 );
             if( shmPtr != (unsigned char *)QUEUE_E_NOT_OK )
             {
-                (void)sem_wait( queue_semaphore );
+                (void)sem_wait( qd->sem );
                 sendResult = queue_enqueue( shmPtr, msg_ptr, msg_len );
-                (void)sem_post( queue_semaphore );
+                (void)sem_post( qd->sem );
                 munmapResult = munmap( shmPtr, status.st_size );
                 if( munmapResult != QUEUE_E_NOT_OK )
                 {
@@ -166,14 +155,14 @@ int queue_send( int fd, const char *msg_ptr, size_t msg_len )
     return rtn;
 }
 
-int queue_close( int fd )
+int queue_close( qd_t *qd )
 {
     int rtn;
     rtn = QUEUE_E_NOT_OK;
-    if( fd != QUEUE_E_NOT_OK )
+    if( qd->fd != QUEUE_E_NOT_OK )
     {
-        (void)sem_close( queue_semaphore );
-        rtn = close( fd );
+        (void)sem_close( qd->sem );
+        rtn = close( qd->fd );
     }
 
     return rtn;
@@ -190,7 +179,55 @@ int queue_unlink( const char *name )
 /********************************************************/
 /* Internal Functions                                   */
 /********************************************************/
-static int queue_init( int fd, long queue_maxmsg, size_t queue_maxsize )
+static int queue_shm_init( const char *name, int oflag, long queue_maxmsg, size_t queue_msgsize )
+{
+    int rtn;
+    int fd;
+    int initResult;
+
+    rtn = QUEUE_E_NOT_OK;
+    fd = shm_open( name, oflag, S_IRWXU | S_IRWXG | S_IRWXO );
+    if( fd != QUEUE_E_NOT_OK )
+    {
+        if(( oflag & O_CREAT ) == O_CREAT )
+        {
+            initResult = queue_data_init( fd, queue_maxmsg, queue_msgsize );
+            if( initResult == QUEUE_E_OK )
+            {
+                rtn = fd;
+            }
+            else
+            {
+                (void)close( fd );
+                (void)shm_unlink( name );
+            }
+        }
+        else
+        {
+            rtn = fd;
+        }
+    }
+
+    return rtn;
+}
+
+static sem_t* queue_sem_init( const char *name, int oflag )
+{
+    sem_t* rtn;
+
+    if(( oflag & O_CREAT ) == O_CREAT )
+    {
+        rtn = sem_open( name, oflag, S_IRWXU | S_IRWXG | S_IRWXO, 1 );
+    }
+    else
+    {
+        rtn = sem_open( name, 0 );
+    }
+
+    return rtn;
+}
+
+static int queue_data_init( int fd, long queue_maxmsg, size_t queue_maxsize )
 {
     int rtn;
     int ftruncateResult;

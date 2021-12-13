@@ -14,30 +14,31 @@
 /********************************************************/
 int main( void )
 {
-    int fd;
+    int qopen_result;
     int counter;
     int sendResult;
     char msg[100];
+    qd_t qd;
 
-    fd = queue_open( RECV_DRV_QUEUE_NAME, O_RDWR, 0, 0 );
+    qopen_result = queue_open( RECV_DRV_QUEUE_NAME, O_RDWR, 0, 0, &qd );
 
-    if(fd != -1)
+    if( qopen_result != -1 )
     {
         for( counter = 0; counter < 100; counter++ )
         {
             while(1)
             {
-                (void)memset(msg, counter, 100);
-                sendResult = queue_send(fd, msg, ( counter % 10 ) + 1);
+                (void)memset( msg, counter, 100 );
+                sendResult = queue_send( &qd, msg, ( counter % 10 ) + 1 );
                 if( sendResult != -1 )
                 {
                     break;
                 }
-                (void)usleep(50);
+                (void)usleep( 10 );
             }
         }
 
-        queue_close(fd);
+        queue_close( &qd );
     }
     return 0;
 }
